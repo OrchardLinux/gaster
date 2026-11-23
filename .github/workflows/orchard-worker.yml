@@ -1,0 +1,161 @@
+name: Orchard Gaster worker
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/orchard-worker.yml
+      - orchard-worker/**
+      - gaster.c
+      - payload_*.bin
+      - LICENSE
+  workflow_dispatch:
+  push:
+    tags:
+      - 'orchard-worker-v*'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build and test ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-aarch64
+            runner: macos-15
+          - platform: macos-x86_64
+            runner: macos-15-intel
+          - platform: linux-aarch64
+            runner: ubuntu-22.04-arm
+          - platform: linux-x86_64
+            runner: ubuntu-22.04
+    env:
+      RUSTUP_TOOLCHAIN: '1.98.0'
+      MACOSX_DEPLOYMENT_TARGET: '11.0'
+      ASSET: gaster-worker-${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Install the Rust toolchain
+        run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libusb-1.0-0-dev
+
+      - name: Build and test the release binary
+        shell: bash
+        run: |
+          make -C orchard-worker
+          install -d dist
+          install -m 0755 orchard-worker/target/worker/gaster-worker "dist/$ASSET"
+          if [[ "$RUNNER_OS" == macOS ]]; then
+            codesign --force --sign - --timestamp=none "dist/$ASSET"
+            codesign --verify "dist/$ASSET"
+          fi
+          "dist/$ASSET" --self-test
+
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: ${{ env.ASSET }}
+          path: dist/${{ env.ASSET }}
+          if-no-files-found: error
+          overwrite: true
+
+  draft-release:
+    name: Prepare draft release
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    needs: build
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      id-token: write      # sign the attestation as this workflow
+      attestations: write  # store it
+    concurrency:
+      group: orchard-worker-release-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+        with:
+          pattern: gaster-worker-*
+          path: dist
+          merge-multiple: true
+
+      - name: Assemble the release and record the Orchard pins
+        working-directory: dist
+        shell: bash
+        run: |
+          assets=(gaster-worker-{macos,linux}-{aarch64,x86_64})
+          for asset in "${assets[@]}"; do
+            test -s "$asset"
+          done
+          sha256sum "${assets[@]}" > SHA256SUMS
+          cp ../LICENSE LICENSE-upstream
+          cp ../orchard-worker/COPYING COPYING-worker
+
+          {
+            printf '%s\n\n' 'Orchard subprocess worker, not the stock Gaster CLI. Every asset passed the USB-free self-test.'
+            printf '%s\n\n' 'Linux requires the system libusb-1.0 runtime. The worker is distributed under GPL-3.0, with upstream Apache-2.0 notices retained.'
+            printf '%s\n' '| Asset | Bytes | SHA-256 |' '| --- | ---: | --- |'
+            while read -r hash asset; do
+              printf "| \`%s\` | %s | \`%s\` |\n" "$asset" "$(stat -c %s "$asset")" "$hash"
+            done < SHA256SUMS
+          } > release-notes.md
+          tee -a "$GITHUB_STEP_SUMMARY" < release-notes.md
+
+      # Private repositories can't attest; a public one attests every asset, as
+      # orchard does, so publishing can check the build with gh attestation verify.
+      - name: Attest the build
+        if: toJSON(github.event.repository.private) == 'false'
+        id: attest
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: |
+            dist/gaster-worker-*
+            dist/SHA256SUMS
+
+      # The same attestation as a file next to the assets, for checking
+      # without asking GitHub.
+      - name: Add the attestation bundle
+        if: toJSON(github.event.repository.private) == 'false'
+        env:
+          BUNDLE_PATH: ${{ steps.attest.outputs.bundle-path }}
+        run: cp "$BUNDLE_PATH" dist/gaster-worker.sigstore.jsonl
+
+      - name: Create or update the draft
+        working-directory: dist
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          assets=(gaster-worker-{macos,linux}-{aarch64,x86_64} SHA256SUMS LICENSE-upstream COPYING-worker)
+          if [[ -f gaster-worker.sigstore.jsonl ]]; then
+            assets+=(gaster-worker.sigstore.jsonl)
+          fi
+          if is_draft=$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null); then
+            if [[ "$is_draft" != true ]]; then
+              echo "Refusing to replace assets for published release $TAG" >&2
+              exit 1
+            fi
+            gh release edit "$TAG" --notes-file release-notes.md
+            gh release upload "$TAG" --clobber "${assets[@]}"
+          else
+            gh release create "$TAG" --verify-tag --draft \
+              --title "Orchard Gaster worker ${TAG#orchard-worker-}" \
+              --notes-file release-notes.md "${assets[@]}"
+          fi
