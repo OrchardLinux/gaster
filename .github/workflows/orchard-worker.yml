@@ -25,10 +25,15 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # macos-15's arm64 machines never picked this repository's job up
-          # (orchard-worker-v0.1.0, six attempts); macos-26 did.
+          # GitHub's macOS arm64 runners never picked this repository's job
+          # up (macos-15 and macos-26, ten attempts, "not acquired"), so the
+          # arm64 worker is built on the Intel runner. It can't run there:
+          # its self-test is run on an arm64 Mac before the release is
+          # published.
           - platform: macos-aarch64
-            runner: macos-26
+            runner: macos-15-intel
+            cflags: -arch arm64
+            cross: true
           - platform: macos-x86_64
             runner: macos-15-intel
           - platform: linux-aarch64
@@ -56,14 +61,17 @@ jobs:
       - name: Build and test the release binary
         shell: bash
         run: |
-          make -C orchard-worker
+          make -C orchard-worker CFLAGS="${{ matrix.cflags }}"
           install -d dist
           install -m 0755 orchard-worker/target/worker/gaster-worker "dist/$ASSET"
           if [[ "$RUNNER_OS" == macOS ]]; then
             codesign --force --sign - --timestamp=none "dist/$ASSET"
             codesign --verify "dist/$ASSET"
           fi
-          "dist/$ASSET" --self-test
+          file "dist/$ASSET"
+          if [[ "${{ matrix.cross }}" != true ]]; then
+            "dist/$ASSET" --self-test
+          fi
 
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:

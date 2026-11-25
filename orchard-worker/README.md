@@ -35,8 +35,8 @@ branch for a build-only check. Once that revision is on the remote, push a new
 version tag, for example:
 
 ```sh
-git tag -a orchard-worker-v0.1.1 -m 'Orchard Gaster worker v0.1.1'
-git push origin orchard-worker-v0.1.1
+git tag -a orchard-worker-v0.1.2 -m 'Orchard Gaster worker v0.1.2'
+git push origin orchard-worker-v0.1.2
 ```
 
 The tag run creates a draft GitHub release with four raw executables,
