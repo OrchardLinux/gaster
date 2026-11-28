@@ -56,6 +56,14 @@ fn main() {
     source = source.replace(old, &format!(
         "timing_record(\"control-start\", 0, bm_request_type, b_request, w_len, 0);\n\t{old}\n\ttiming_record(\"control-end\", ret, bm_request_type, b_request, w_len, req.wLenDone);"
     ));
+    // The setup stage is a race the host has to win: a transfer aborted after
+    // only part of its data went out. The requests and their order stay as
+    // upstream's; added are a count of what each attempt sent, for the
+    // caller's log, an end when the device no longer takes requests (upstream
+    // tries for ever), and a limit of its own for the wait before the abort.
+    let old = "\tfor(;;) {\n\t\tif(send_usb_control_request_async_no_data(handle, 0x21, DFU_DNLOAD, 0, 0, DFU_MAX_TRANSFER_SZ, usb_abort_timeout, &transfer_ret) && transfer_ret.sz < config_overwrite_pad && send_usb_control_request_no_data(handle, 0, 0, 0, 0, config_overwrite_pad - transfer_ret.sz, &transfer_ret) && transfer_ret.ret == USB_TRANSFER_STALL) {\n\t\t\treturn true;\n\t\t}\n\t\tsend_usb_control_request_no_data(handle, 0x21, DFU_DNLOAD, 0, 0, EP0_MAX_PACKET_SZ, NULL);\n\t\tusb_abort_timeout = (usb_abort_timeout + 1) % (usb_timeout - usb_abort_timeout_min + 1) + usb_abort_timeout_min;\n\t}";
+    assert_eq!(source.matches(old).count(), 1);
+    source = source.replace(old, "\tusb_abort_timeout = setup_first_abort();\n\tfor(;;) {\n\t\tbool sent = send_usb_control_request_async_no_data(handle, 0x21, DFU_DNLOAD, 0, 0, DFU_MAX_TRANSFER_SZ, usb_abort_timeout, &transfer_ret);\n\t\tif(!setup_attempt(sent, sent ? transfer_ret.sz : 0, config_overwrite_pad)) {\n\t\t\treturn false;\n\t\t}\n\t\tif(sent && transfer_ret.sz < config_overwrite_pad && send_usb_control_request_no_data(handle, 0, 0, 0, 0, config_overwrite_pad - transfer_ret.sz, &transfer_ret) && transfer_ret.ret == USB_TRANSFER_STALL) {\n\t\t\tsetup_report(\"won\", config_overwrite_pad);\n\t\t\treturn true;\n\t\t}\n\t\tsend_usb_control_request_no_data(handle, 0x21, DFU_DNLOAD, 0, 0, EP0_MAX_PACKET_SZ, NULL);\n\t\tusb_abort_timeout = setup_next_abort(usb_abort_timeout);\n\t}");
     for stage in ["reset", "setup", "spray", "patch"] {
         let old = format!("ret = checkm8_stage_{stage}(handle);");
         assert_eq!(source.matches(&old).count(), 1);
