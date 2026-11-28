@@ -10,6 +10,10 @@ make -C orchard-worker
 make -C orchard-worker check
 ```
 
+An entry (`pwn`) writes upstream's diagnostics, each stage as it is tried
+and whether it worked, to stderr for the caller's log. A key operation
+(`unwrap`) writes none.
+
 The executable is `orchard-worker/target/worker/gaster-worker`. The `check`
 target runs the worker's self-test without accessing USB. Builds require Cargo
 and a C compiler. Linux also requires `pkg-config` and libusb development files;
@@ -35,8 +39,8 @@ branch for a build-only check. Once that revision is on the remote, push a new
 version tag, for example:
 
 ```sh
-git tag -a orchard-worker-v0.1.2 -m 'Orchard Gaster worker v0.1.2'
-git push origin orchard-worker-v0.1.2
+git tag -a orchard-worker-v0.1.3 -m 'Orchard Gaster worker v0.1.3'
+git push origin orchard-worker-v0.1.3
 ```
 
 The tag run creates a draft GitHub release with four raw executables,
