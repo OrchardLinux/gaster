@@ -42,6 +42,49 @@ static void timing_flush(void) {
     }
     fclose(out);
 }
+/* The setup stage's race, for the caller's log: how many attempts, and how
+ * much of a transfer went out before its abort. An attempt can only win
+ * while that stays under the chip's limit. */
+static unsigned long setup_attempts, setup_under, setup_refused;
+static uint32_t setup_least = UINT32_MAX, setup_most;
+static unsigned setup_abort_max;
+static bool setup_testing;
+static unsigned usb_timeout, usb_abort_timeout_min;
+/* How long an attempt waits before its abort, in ms: upstream goes round
+ * from the least to the request timeout; ORCHARD_GASTER_ABORT_MAX ends the
+ * round earlier. */
+static unsigned setup_first_abort(void) {
+    return setup_abort_max > usb_abort_timeout_min ? setup_abort_max - 1 : usb_abort_timeout_min;
+}
+static unsigned setup_next_abort(unsigned now) {
+    return (now + 1) % (setup_abort_max - usb_abort_timeout_min + 1) + usb_abort_timeout_min;
+}
+static void setup_report(const char *how, size_t limit) {
+    if (setup_least == UINT32_MAX) setup_least = 0;
+    printf("SETUP %s after %lu attempts: before the abort %u to %u bytes went out, under the limit of %zu in %lu attempts\n",
+           how, setup_attempts, setup_least, setup_most, limit, setup_under);
+}
+/* False once the device takes no request any more: it has left DFU mode. */
+static bool setup_attempt(bool sent, uint32_t size, size_t limit) {
+    ++setup_attempts;
+    if (sent) {
+        setup_refused = 0;
+        if (size < setup_least) setup_least = size;
+        if (size > setup_most) setup_most = size;
+        if (size < limit) ++setup_under;
+    } else if (++setup_refused == 64) {
+        setup_report("lost the device", limit);
+        if (!setup_testing) {
+            puts("The device takes no request any more: it has left DFU mode.");
+            timing_flush();
+            fflush(stdout);
+            _exit(3);
+        }
+        return false;
+    }
+    if (setup_attempts % 500 == 0) setup_report("still trying", limit);
+    return true;
+}
 #include "device-gaster.c"
 
 static uint64_t selected_ecid;
@@ -107,7 +150,40 @@ static bool number(const char *text, uint64_t *n) {
     *n = strtoull(text, &end, 16);
     return !errno && !*end;
 }
+/* A decimal number of at most four digits. */
+static bool decimal(const char *text, uint64_t *n) {
+    if (!text || !*text || strlen(text) > 4 || strspn(text, "0123456789") != strlen(text)) return false;
+    *n = strtoull(text, NULL, 10);
+    return true;
+}
+static int self_test_setup(void) {
+    /* Upstream's round with its defaults: 4, 5, 0, 1, 2, 3, 4. */
+    usb_timeout = 5; usb_abort_timeout_min = 0; setup_abort_max = 5;
+    unsigned wait = setup_first_abort(), round[6];
+    if (wait != 4) return 1;
+    for (int i = 0; i < 6; i++) round[i] = wait = setup_next_abort(wait);
+    if (round[0] != 5 || round[1] != 0 || round[2] != 1 || round[5] != 4) return 1;
+    /* A lower end of the round: 0, 1, 0; and none at all. */
+    setup_abort_max = 1;
+    if (setup_first_abort() != 0 || setup_next_abort(0) != 1 || setup_next_abort(1) != 0) return 1;
+    setup_abort_max = 0;
+    if (setup_first_abort() != 0 || setup_next_abort(0) != 0) return 1;
+    usb_abort_timeout_min = 2; setup_abort_max = 3;
+    if (setup_first_abort() != 2 || setup_next_abort(2) != 3 || setup_next_abort(3) != 2) return 1;
+    /* The count, and the end after 64 refused attempts in a row. */
+    setup_testing = true;
+    freopen("/dev/null", "w", stdout);
+    if (!setup_attempt(true, 0x800, 0x500) || !setup_attempt(true, 0x40, 0x500)) return 1;
+    if (setup_attempts != 2 || setup_under != 1 || setup_least != 0x40 || setup_most != 0x800) return 1;
+    for (int i = 0; i < 63; i++) if (!setup_attempt(false, 0, 0x500)) return 1;
+    if (!setup_attempt(true, 0x100, 0x500)) return 1;
+    for (int i = 0; i < 63; i++) if (!setup_attempt(false, 0, 0x500)) return 1;
+    if (setup_attempt(false, 0, 0x500)) return 1;
+    uint64_t n;
+    return decimal("10", &n) && n == 10 && !decimal("0x10", &n) && !decimal("", &n) && !decimal("12345", &n) ? 0 : 1;
+}
 static int self_test(void) {
+    if (self_test_setup()) return 1;
     timing_mark("disabled");
     if (timing_count) return 1;
     timing_path = "self-test";
@@ -165,12 +241,21 @@ int main(int argc, char **argv) {
         setvbuf(stdout, NULL, _IOLBF, 0);
     }
     alarm((unsigned)seconds);
-    usb_timeout = 5; usb_abort_timeout_min = 0;
+    /* Upstream's timing, or a test run's own: the request timeout, and the
+     * least and the most an attempt waits before its abort, all in ms. */
+    uint64_t timeout = 5, least = 0, most;
+    const char *value;
+    if ((value = getenv("ORCHARD_GASTER_USB_TIMEOUT")) && (!decimal(value, &timeout) || !timeout || timeout > 1000)) return 2;
+    most = timeout;
+    if ((value = getenv("ORCHARD_GASTER_ABORT_MIN")) && (!decimal(value, &least) || least > timeout)) return 2;
+    if ((value = getenv("ORCHARD_GASTER_ABORT_MAX")) && (!decimal(value, &most) || most > timeout || most < least)) return 2;
+    usb_timeout = (unsigned)timeout; usb_abort_timeout_min = (unsigned)least; setup_abort_max = (unsigned)most;
     usb_handle_t handle;
     if (!unwrap_only) {
         timing_path = getenv("ORCHARD_GASTER_TRACE");
         timing_origin = timing_now();
         timing_mark("worker-start");
+        printf("Timing: requests %u ms, abort after %u to %u ms\n", usb_timeout, usb_abort_timeout_min, setup_abort_max);
         bool ok = gaster_checkm8(&handle);
         timing_record("worker-end", ok, 0, 0, 0, 0);
         timing_flush();

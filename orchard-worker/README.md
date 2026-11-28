@@ -14,6 +14,19 @@ An entry (`pwn`) writes upstream's diagnostics, each stage as it is tried
 and whether it worked, to stderr for the caller's log. A key operation
 (`unwrap`) writes none.
 
+The setup stage is a race: a transfer has to be aborted after only part of
+its data went out. The worker reports how it went (`SETUP won after N
+attempts: before the abort A to B bytes went out, under the limit of L in K
+attempts`), every 500 attempts while it is still trying. Upstream tries for
+ever; the worker ends with exit status 3 once the device takes no request
+any more, which is a device that has left DFU mode.
+
+For a test run, three environment variables set the timing in ms (decimal):
+`ORCHARD_GASTER_USB_TIMEOUT` (a request's timeout, 5), and
+`ORCHARD_GASTER_ABORT_MIN` and `ORCHARD_GASTER_ABORT_MAX` (the least and
+the most an attempt waits before its abort; 0 and the request timeout).
+Without them the timing is upstream's.
+
 The executable is `orchard-worker/target/worker/gaster-worker`. The `check`
 target runs the worker's self-test without accessing USB. Builds require Cargo
 and a C compiler. Linux also requires `pkg-config` and libusb development files;
@@ -39,8 +52,8 @@ branch for a build-only check. Once that revision is on the remote, push a new
 version tag, for example:
 
 ```sh
-git tag -a orchard-worker-v0.1.3 -m 'Orchard Gaster worker v0.1.3'
-git push origin orchard-worker-v0.1.3
+git tag -a orchard-worker-v0.1.4 -m 'Orchard Gaster worker v0.1.4'
+git push origin orchard-worker-v0.1.4
 ```
 
 The tag run creates a draft GitHub release with four raw executables,
