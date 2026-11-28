@@ -137,7 +137,9 @@ static int self_test(void) {
 int main(int argc, char **argv) {
     if (argc == 2 && !strcmp(argv[1], "--self-test")) return self_test();
     /* All validation precedes even USB enumeration. Reply stdout is duplicated
-     * before upstream's diagnostics are redirected to /dev/null. */
+     * before upstream's diagnostics are redirected: to stderr for an entry,
+     * which handles no secret, so the caller can log each stage as it is
+     * tried; to /dev/null for a key operation. */
     uint64_t chip, board, seconds;
     if (argc != 7 || (strcmp(argv[1], "pwn") && strcmp(argv[1], "unwrap")) ||
         !number(argv[2], &selected_ecid) || !selected_ecid ||
@@ -158,6 +160,10 @@ int main(int argc, char **argv) {
     } else if (strcmp(argv[6], "-")) return 2;
     int reply = dup(STDOUT_FILENO);
     if (reply < 0 || !freopen("/dev/null", "w", stdout)) return 2;
+    if (!unwrap_only) {
+        if (dup2(STDERR_FILENO, STDOUT_FILENO) < 0) return 2;
+        setvbuf(stdout, NULL, _IOLBF, 0);
+    }
     alarm((unsigned)seconds);
     usb_timeout = 5; usb_abort_timeout_min = 0;
     usb_handle_t handle;
